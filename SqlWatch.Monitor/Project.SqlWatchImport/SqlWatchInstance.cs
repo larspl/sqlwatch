@@ -494,9 +494,11 @@ namespace SqlWatchImport
 					// BULK COPY
 					// ------------------------------------------------------------------------------------------------------------------------------
 					int rowsCopied = 0;
+					string originalDataQuery = ""; // Store original query for retries
 
 					using (SqlCommand cmdGetData = new SqlCommand(sql, connectionRemote))
 					{
+						originalDataQuery = sql; // Preserve the original data query for retries
 						cmdGetData.CommandTimeout = Config.BulkCopyTimeout;
 
 						//import data into #t table
@@ -618,94 +620,94 @@ namespace SqlWatchImport
 					// ------------------------------------------------------------------------------------------------------------------------------
 					if (rowsCopied > 0) //&& tableName != "dbo.sqlwatch_logger_snapshot_header")
 					{
-						sql = "";
-
-						if (HasIdentity == true)
+						// Retry logic for the entire merge operation
+						int retryCount = 0;
+						int maxRetries = 3;
+						
+						while (retryCount <= maxRetries)
 						{
-							sql += $"\nset identity_insert { tableName } on;";
-						}
-
-						string allColumns = AllColumns;
-
-						// Use optimized merge with appropriate lock hints and conflict handling
-						string lockHint = tableName.Contains("sqlwatch_logger") ? "with (ROWLOCK, READPAST)" : "with (UPDLOCK, SERIALIZABLE)";
-						sql += $";merge { tableName } {lockHint} as target ";
-
-						if (tableName.Contains("sqlwatch_logger") == true && tableName != "dbo.sqlwatch_logger_snapshot_header")
-						{
-							sql += $@"
-								using (
-								select s.* from {workingTableName} s
-								inner join dbo.sqlwatch_logger_snapshot_header h
-									on s.[snapshot_time] = h.[snapshot_time]
-									and s.[snapshot_type_id] = h.[snapshot_type_id]
-									and s.[sql_instance] = h.[sql_instance]) as source";
-						}
-						else if (useStaging)
-						{
-							// For staging tables, add deduplication to prevent constraint violations
-							string primaryKeyColumns = primaryKeys;
-							if (!string.IsNullOrEmpty(primaryKeyColumns))
+							try
 							{
-								sql += $@"using (
-									select * from (
-										select *, row_number() over (partition by {primaryKeyColumns} order by (select null)) as rn
-										from {workingTableName}
-									) deduped where rn = 1
-								) as source";
-							}
-							else
-							{
-								sql += $"using {workingTableName} as source";
-							}
-						}
-						else
-						{
-							sql += $"using {workingTableName} as source";
-						}
+								sql = "";
 
-						sql += $@"
-							on ({ Joins })
-							when not matched
-							then insert ({ allColumns })
-							values (source.{ allColumns.Replace(",", ",source.") })";
-
-						string updateColumns = UpdateColumns;
-
-						// we would never update existing logger tables
-						if (updateColumns != "" && tableName.Contains("sqlwatch_logger") == false)
-						{
-							sql += $@"
-							when matched
-							then update set
-							{ updateColumns }";
-						}
-
-						sql += ";";
-
-						if (HasIdentity == true)
-						{
-							sql += $"\nset identity_insert { tableName } off;";
-						}
-
-						// Add cleanup for staging tables
-						if (useStaging)
-						{
-							sql += $"\ndrop table {workingTableName};";
-						}
-
-						using (SqlCommand cmdMergeTable = new SqlCommand(sql, connectionRepository))
-						{
-							cmdMergeTable.CommandTimeout = Config.BulkCopyTimeout;
-
-							// Retry logic for concurrent access issues
-							int retryCount = 0;
-							int maxRetries = 3;
-							
-							while (retryCount <= maxRetries)
-							{
-								try
+								if (HasIdentity == true)
 								{
+									sql += $"\nset identity_insert { tableName } on;";
+								}
+
+								string allColumns = AllColumns;
+
+								// Use optimized merge with appropriate lock hints and conflict handling
+								string lockHint = tableName.Contains("sqlwatch_logger") ? "with (ROWLOCK, READPAST)" : "with (UPDLOCK, SERIALIZABLE)";
+								sql += $";merge { tableName } {lockHint} as target ";
+
+								if (tableName.Contains("sqlwatch_logger") == true && tableName != "dbo.sqlwatch_logger_snapshot_header")
+								{
+									sql += $@"
+										using (
+										select s.* from {workingTableName} s
+										inner join dbo.sqlwatch_logger_snapshot_header h
+											on s.[snapshot_time] = h.[snapshot_time]
+											and s.[snapshot_type_id] = h.[snapshot_type_id]
+											and s.[sql_instance] = h.[sql_instance]) as source";
+								}
+								else if (useStaging)
+								{
+									// For staging tables, add deduplication to prevent constraint violations
+									string primaryKeyColumns = primaryKeys;
+									if (!string.IsNullOrEmpty(primaryKeyColumns))
+									{
+										sql += $@"using (
+											select * from (
+												select *, row_number() over (partition by {primaryKeyColumns} order by (select null)) as rn
+												from {workingTableName}
+											) deduped where rn = 1
+										) as source";
+									}
+									else
+									{
+										sql += $"using {workingTableName} as source";
+									}
+								}
+								else
+								{
+									sql += $"using {workingTableName} as source";
+								}
+
+								sql += $@"
+									on ({ Joins })
+									when not matched
+									then insert ({ allColumns })
+									values (source.{ allColumns.Replace(",", ",source.") })";
+
+								string updateColumns = UpdateColumns;
+
+								// we would never update existing logger tables
+								if (updateColumns != "" && tableName.Contains("sqlwatch_logger") == false)
+								{
+									sql += $@"
+									when matched
+									then update set
+									{ updateColumns }";
+								}
+
+								sql += ";";
+
+								if (HasIdentity == true)
+								{
+									sql += $"\nset identity_insert { tableName } off;";
+								}
+
+								// Add cleanup for staging tables
+								if (useStaging)
+								{
+									sql += $"\ndrop table {workingTableName};";
+								}
+
+								using (SqlCommand cmdMergeTable = new SqlCommand(sql, connectionRepository))
+								{
+									cmdMergeTable.CommandTimeout = Config.BulkCopyTimeout;
+									
 									Stopwatch mg = Stopwatch.StartNew();
 									int nRows = await cmdMergeTable.ExecuteNonQueryAsync();
 									t2 += mg.Elapsed.TotalMilliseconds;
@@ -715,95 +717,235 @@ namespace SqlWatchImport
 
 									return true;
 								}
-								catch (SqlException e) when (e.Number == 2627 || e.Number == 2601) // Unique constraint violations
+							}
+							catch (SqlException e) when (e.Number == 2627 || e.Number == 2601) // Unique constraint violations
+							{
+								retryCount++;
+								if (retryCount <= maxRetries)
 								{
-									retryCount++;
-									if (retryCount <= maxRetries)
-									{
-										Logger.LogVerbose($"Unique constraint violation on \"{tableName}\" for \"{SqlInstance}\", retry {retryCount}/{maxRetries}. Waiting {retryCount * 100}ms...");
-										
-										// Clean up staging table before retry
-										if (useStaging)
-										{
-											try
-											{
-												string dropStagingSql = $"IF OBJECT_ID('{workingTableName}', 'U') IS NOT NULL DROP TABLE {workingTableName};";
-												using (SqlCommand dropCmd = new SqlCommand(dropStagingSql, connectionRepository))
-												{
-													dropCmd.CommandTimeout = Config.BulkCopyTimeout;
-													await dropCmd.ExecuteNonQueryAsync();
-													Logger.LogVerbose($"Dropped staging table {workingTableName} before retry");
-												}
-											}
-											catch (Exception dropEx)
-											{
-												Logger.LogVerbose($"Warning: Could not drop staging table {workingTableName}: {dropEx.Message}");
-											}
-										}
-										
-										await Task.Delay(retryCount * 100); // Progressive delay
-										continue;
-									}
+									Logger.LogVerbose($"Unique constraint violation on \"{tableName}\" for \"{SqlInstance}\", retry {retryCount}/{maxRetries}. Waiting {retryCount * 200}ms...");
 									
-									// If all retries failed, check if the data already exists (acceptable scenario)
-									// For complex joins, just check if we have any data for this instance in the target table
-									string checkSql = $"SELECT COUNT(*) FROM {tableName} WHERE sql_instance = '{SqlInstance}'";
-									using (SqlCommand checkCmd = new SqlCommand(checkSql, connectionRepository))
+									// For meta tables, remove conflicting rows from destination before retry
+									if (tableName.Contains("sqlwatch_meta") && !string.IsNullOrEmpty(primaryKeys))
 									{
 										try
 										{
-											var existingCount = await checkCmd.ExecuteScalarAsync();
-											if (Convert.ToInt32(existingCount) > 0)
+											Logger.LogVerbose($"Removing conflicting rows from destination table {tableName} for instance {SqlInstance}");
+											
+											// For meta tables, we should remove only the specific conflicting rows based on primary keys
+											// This is more precise than removing all data for an instance
+											string deleteSql;
+											
+											if (tableName == "dbo.sqlwatch_meta_table")
 											{
-												Logger.LogVerbose($"Data already exists in \"{tableName}\" for \"{SqlInstance}\", treating as successful import");
-												return true;
+												// For meta_table, remove only the specific conflicting tables/databases for this instance
+												// Primary key is typically: sql_instance, sqlwatch_database_id, sqlwatch_table_id
+												deleteSql = $@"
+													DELETE dest FROM {tableName} dest
+													INNER JOIN {workingTableName} staging 
+													ON dest.sql_instance = staging.sql_instance 
+													AND dest.sqlwatch_database_id = staging.sqlwatch_database_id 
+													AND dest.sqlwatch_table_id = staging.sqlwatch_table_id
+													WHERE dest.sql_instance = '{SqlInstance}'";
+											}
+											else
+											{
+												// For other meta tables, use precise matching based on primary keys
+												deleteSql = $@"
+													DELETE dest FROM {tableName} dest
+													INNER JOIN {workingTableName} staging 
+													ON {BuildJoinCondition(primaryKeys, "dest", "staging")}
+													WHERE dest.sql_instance = '{SqlInstance}'";
+											}
+											
+											using (SqlCommand deleteCmd = new SqlCommand(deleteSql, connectionRepository))
+											{
+												deleteCmd.CommandTimeout = Config.BulkCopyTimeout;
+												int deletedRows = await deleteCmd.ExecuteNonQueryAsync();
+												Logger.LogVerbose($"Removed {deletedRows} conflicting rows from {tableName} for {SqlInstance} (specific objects only)");
 											}
 										}
-										catch (Exception checkEx)
+										catch (Exception deleteEx)
 										{
-											Logger.LogVerbose($"Could not verify existing data in \"{tableName}\" for \"{SqlInstance}\": {checkEx.Message}");
+											Logger.LogVerbose($"Warning: Could not remove conflicting rows from {tableName}: {deleteEx.Message}");
+											
+											// If precise deletion fails, try a fallback approach for meta_table only
+											if (tableName == "dbo.sqlwatch_meta_table")
+											{
+												try
+												{
+													Logger.LogVerbose($"Attempting fallback deletion strategy for {tableName}");
+													
+													// Fallback: Get the specific database and table IDs from staging and delete only those
+													string fallbackDeleteSql = $@"
+														DELETE FROM {tableName} 
+														WHERE sql_instance = '{SqlInstance}'
+														AND (sqlwatch_database_id, sqlwatch_table_id) IN (
+															SELECT DISTINCT sqlwatch_database_id, sqlwatch_table_id 
+															FROM {workingTableName}
+														)";
+													
+													using (SqlCommand fallbackCmd = new SqlCommand(fallbackDeleteSql, connectionRepository))
+													{
+														fallbackCmd.CommandTimeout = Config.BulkCopyTimeout;
+														int fallbackDeleted = await fallbackCmd.ExecuteNonQueryAsync();
+														Logger.LogVerbose($"Fallback deletion removed {fallbackDeleted} rows from {tableName} for {SqlInstance}");
+													}
+												}
+												catch (Exception fallbackEx)
+												{
+													Logger.LogVerbose($"Fallback deletion also failed for {tableName}: {fallbackEx.Message}");
+												}
+											}
 										}
 									}
 									
-									// If data doesn't exist, it's a real error
-									string message = $"Failed to merge table \"[{ SqlInstance }].{ tableName }\" after {maxRetries} retries";
-									Logger.LogError(message, e.Errors[0].Message, sql);
-									return false;
-								}
-								catch (SqlException e)
-								{
-									string message = $"Failed to merge table \"[{ SqlInstance }].{ tableName }\"";
-									if (e.Errors[0].Message.Contains("Violation of PRIMARY KEY constraint") == true)
+									// Clean up any existing staging table
+									try
 									{
-										message += ". Perhaps you should try running a full load to try to resolve the issue.";
+										string cleanupSql = $"IF OBJECT_ID('{workingTableName}', 'U') IS NOT NULL DROP TABLE {workingTableName};";
+										using (SqlCommand cleanupCmd = new SqlCommand(cleanupSql, connectionRepository))
+										{
+											cleanupCmd.CommandTimeout = Config.BulkCopyTimeout;
+											await cleanupCmd.ExecuteNonQueryAsync();
+											Logger.LogVerbose($"Cleaned up staging table {workingTableName} before retry");
+										}
+									}
+									catch (Exception cleanupEx)
+									{
+										Logger.LogVerbose($"Warning: Could not cleanup staging table {workingTableName}: {cleanupEx.Message}");
 									}
 
-									Logger.LogError(message, e.Errors[0].Message, sql);
+									// Create new unique staging table name for retry
+									string newUniqueId = $"{Environment.MachineName}_{Thread.CurrentThread.ManagedThreadId}_{DateTime.Now:yyyyMMddHHmmssfff}_{Guid.NewGuid().ToString("N").Substring(0, 8)}";
+									string newSafeInstanceName = SqlInstance.Replace("\\", "_").Replace(".", "_").Replace("-", "_").Replace(" ", "_").Replace("[", "").Replace("]", "");
+									string newSafeTableName = tableName.Replace("dbo.", "").Replace("[", "").Replace("]", "");
+									
+									workingTableName = useStaging ? 
+										$"[#stg_{newSafeTableName}_{newSafeInstanceName}_{DateTime.Now:yyyyMMddHHmmss}_{Thread.CurrentThread.ManagedThreadId}_r{retryCount}]" : 
+										$"[#{ tableName }_r{retryCount}]";
 
-									//dump # table to physical table to help debugging
-									if (Config.dumpOnError == true)
+									// Recreate staging table with new name
+									try
+									{
+										string recreateSql = $"select top 0 * into {workingTableName} from { tableName } with (nolock);";
+										
+										// Add primary key for direct approach only
+										string PkColumns = primaryKeys;
+										if (PkColumns != "" && !useStaging)
+										{
+											recreateSql += $"alter table {workingTableName} add primary key ({ PkColumns }); ";
+										}
+
+										using (SqlCommand recreateCmd = new SqlCommand(recreateSql, connectionRepository))
+										{
+											recreateCmd.CommandTimeout = Config.BulkCopyTimeout;
+											await recreateCmd.ExecuteNonQueryAsync();
+											Logger.LogVerbose($"Recreated staging table {workingTableName} for retry {retryCount}");
+										}
+
+										// Re-bulk copy the data to new staging table
+										using (SqlCommand cmdGetRetryData = new SqlCommand(originalDataQuery, connectionRemote))
+										{
+											cmdGetRetryData.CommandTimeout = Config.BulkCopyTimeout;
+											using (SqlDataReader retryReader = await cmdGetRetryData.ExecuteReaderAsync())
+											{
+												var options = SqlBulkCopyOptions.KeepIdentity;
+												if (tableName.Contains("sqlwatch_logger"))
+												{
+													options |= SqlBulkCopyOptions.CheckConstraints;
+												}
+												else if (useStaging)
+												{
+													options |= SqlBulkCopyOptions.TableLock;
+												}
+
+												using (SqlBulkCopy retryBulkCopy = new SqlBulkCopy(connectionRepository, options, null))
+												{
+													retryBulkCopy.DestinationTableName = workingTableName;
+													retryBulkCopy.BulkCopyTimeout = Config.BulkCopyTimeout;
+													retryBulkCopy.EnableStreaming = Config.SqlBkEnableStreaming;
+													
+													if (useStaging && tableName.Contains("sqlwatch_meta"))
+													{
+														retryBulkCopy.BatchSize = Config.MergeBatchSize;
+													}
+													else
+													{
+														retryBulkCopy.BatchSize = Config.SqlBkBatchSize;
+													}
+
+													await retryBulkCopy.WriteToServerAsync(retryReader);
+													Logger.LogVerbose($"Re-copied data to {workingTableName} for retry {retryCount}");
+												}
+											}
+										}
+									}
+									catch (Exception recreateEx)
+									{
+										Logger.LogError($"Failed to recreate staging table for retry {retryCount}: {recreateEx.Message}");
+										break; // Exit retry loop on recreation failure
+									}
+									
+									await Task.Delay(retryCount * 200); // Progressive delay
+									continue;
+								}
+								
+								// If all retries failed, check if the data already exists (acceptable scenario)
+								string checkSql = $"SELECT COUNT(*) FROM {tableName} WHERE sql_instance = '{SqlInstance}'";
+								using (SqlCommand checkCmd = new SqlCommand(checkSql, connectionRepository))
+								{
+									try
+									{
+										var existingCount = await checkCmd.ExecuteScalarAsync();
+										if (Convert.ToInt32(existingCount) > 0)
+										{
+											Logger.LogVerbose($"Data already exists in \"{tableName}\" for \"{SqlInstance}\", treating as successful import");
+											return true;
+										}
+									}
+									catch (Exception checkEx)
+									{
+										Logger.LogVerbose($"Could not verify existing data in \"{tableName}\" for \"{SqlInstance}\": {checkEx.Message}");
+									}
+								}
+								
+								string message = $"Failed to merge table \"[{ SqlInstance }].{ tableName }\" after {maxRetries} retries";
+								Logger.LogError(message, e.Errors[0].Message, sql);
+								return false;
+							}
+							catch (SqlException e)
+							{
+								string message = $"Failed to merge table \"[{ SqlInstance }].{ tableName }\"";
+								if (e.Errors[0].Message.Contains("Violation of PRIMARY KEY constraint") == true)
+								{
+									message += ". Perhaps you should try running a full load to try to resolve the issue.";
+								}
+
+								Logger.LogError(message, e.Errors[0].Message, sql);
+
+								//dump # table to physical table to help debugging
+								if (Config.dumpOnError == true)
+								{
+									try
 									{
 										sql = $"select * into [_DUMP_{ string.Format("{0:yyyyMMddHHmmssfff}", DateTime.Now) }_{ SqlInstance }.{ tableName }] from {workingTableName}";
 										using (SqlCommand cmdDumpData = new SqlCommand(sql, connectionRepository))
 										{
-											try
-											{
-												cmdDumpData.ExecuteNonQuery();
-											}
-											catch (SqlException x)
-											{
-												Logger.LogError("Failed to dump data into a table for debugging. This was not expected.", x.Errors[0].Message, sql);
-												return false;
-											}
+											cmdDumpData.ExecuteNonQuery();
 										}
 									}
-									return false;
+									catch (SqlException x)
+									{
+										Logger.LogError("Failed to dump data into a table for debugging. This was not expected.", x.Errors[0].Message, sql);
+									}
 								}
+								return false;
 							}
-							
-							// If we get here, all retries failed
-							return false;
 						}
+						
+						// If we get here, all retries failed
+						return false;
 					}
 					else
 					{
@@ -830,6 +972,16 @@ namespace SqlWatchImport
 				var result = await cmd.ExecuteScalarAsync();
 				return result.ToString();
 			}
+		}
+
+		private string BuildJoinCondition(string primaryKeys, string leftAlias, string rightAlias)
+		{
+			if (string.IsNullOrEmpty(primaryKeys))
+				return "1=1"; // Fallback condition
+				
+			var keyColumns = primaryKeys.Split(',').Select(k => k.Trim().Replace("[", "").Replace("]", "")).ToArray();
+			var conditions = keyColumns.Select(col => $"{leftAlias}.[{col}] = {rightAlias}.[{col}]");
+			return string.Join(" AND ", conditions);
 		}
 
 		public async Task<string> GetVersion()
