@@ -955,41 +955,6 @@ namespace SqlWatchImport
 								Logger.LogError(message, e.Errors[0].Message, sql);
 								return false;
 							}
-							catch (SqlException e)
-							{
-								string message = $"Failed to merge table \"[{ SqlInstance }].{ tableName }\"";
-								if (e.Errors[0].Message.Contains("Violation of PRIMARY KEY constraint") == true)
-								{
-									message += ". Perhaps you should try running a full load to try to resolve the issue.";
-								}
-
-								Logger.LogError(message, e.Errors[0].Message, sql);
-
-								//dump # table to physical table to help debugging
-								if (Config.dumpOnError == true)
-								{
-									try
-									{
-										string dumpTableName = $"[_DUMP_{ string.Format("{0:yyyyMMddHHmmssfff}", DateTime.Now) }_{SqlInstance.Replace("\\", "_").Replace(".", "_")}_{tableName.Replace("dbo.", "").Replace("[", "").Replace("]", "")}]";
-										sql = $"select * into {dumpTableName} from {workingTableName}";
-										using (SqlCommand cmdDumpData = new SqlCommand(sql, connectionRepository))
-										{
-											cmdDumpData.CommandTimeout = Config.BulkCopyTimeout;
-											cmdDumpData.ExecuteNonQuery();
-											Logger.LogVerbose($"Dumped staging data to {dumpTableName} for debugging");
-										}
-									}
-									catch (SqlException x)
-									{
-										Logger.LogError("Failed to dump data into a table for debugging. This was not expected.", x.Errors[0].Message, sql);
-									}
-								}
-								
-								// Preserve staging table for debugging - don't drop it
-								Logger.LogVerbose($"Preserving staging table {workingTableName} for debugging purposes");
-								
-								return false;
-							}
 						}
 						
 						// If we get here, all retries failed
