@@ -37,7 +37,7 @@ namespace SqlWatchImport
 			}
 			catch (Exception e)
             {
-				Logger.LogWarning("I was not able to rotate log files");
+				Logger.LogWarning($"I was not able to rotate log files: {e.Message}");
             }
 		}
 

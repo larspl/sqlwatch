@@ -46,6 +46,16 @@ namespace SqlWatchImport
 		public static int MinPoolSize = int.Parse(ConfigurationManager.AppSettings["MinPoolSize"]);
 		public static int MaxPoolSize = int.Parse(ConfigurationManager.AppSettings["MaxPoolSize"]);
 
+		// Hybrid Approach: Advanced Threading Control
+		public static int GlobalConcurrencyLimit = int.Parse(ConfigurationManager.AppSettings["GlobalConcurrencyLimit"]);
+		public static int LoggerTableConcurrency = int.Parse(ConfigurationManager.AppSettings["LoggerTableConcurrency"]);
+		public static int MetaTableConcurrency = int.Parse(ConfigurationManager.AppSettings["MetaTableConcurrency"]);
+		public static int DefaultTableConcurrency = int.Parse(ConfigurationManager.AppSettings["DefaultTableConcurrency"]);
+		public static bool UseStaginForMetaTables = bool.Parse(ConfigurationManager.AppSettings["UseStaginForMetaTables"]);
+		public static int MergeBatchSize = int.Parse(ConfigurationManager.AppSettings["MergeBatchSize"]);
+		public static int StaggerDelayMinMs = int.Parse(ConfigurationManager.AppSettings["StaggerDelayMinMs"]);
+		public static int StaggerDelayMaxMs = int.Parse(ConfigurationManager.AppSettings["StaggerDelayMaxMs"]);
+
 		// Other
 		public static string textDivider = "------------------------------------------------------------------------";
 		public static string tsplaceholder = "                        ";

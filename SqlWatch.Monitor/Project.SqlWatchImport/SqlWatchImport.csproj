@@ -51,6 +51,7 @@
   <ItemGroup>
     <Compile Include="Config.cs" />
     <Compile Include="Extensions.cs" />
+    <Compile Include="HybridImportManager.cs" />
     <Compile Include="Logger.cs" />
     <Compile Include="Options.cs" />
     <Compile Include="Program.cs" />

@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Caching;
 
@@ -297,50 +298,50 @@ namespace SqlWatchImport
 
 			string SqlInstance = this.SqlInstance;
 
-			Logger.LogMessage($"Importing: \"{ SqlInstance }\"");
+			Logger.LogMessage($"Importing: \"{ SqlInstance }\" using Hybrid Approach");
 
 			if (await IsOnline() == false)
 			{
 				return false;
 			}
 
-			await Task.Run(() =>
+			// Use dependency-level processing but with hybrid concurrency control
+			int depLevels = (SqlWatchTables.Max(s => s.DependencyLevel));
+			for (int i = 1; i <= depLevels; i++)
 			{
-				List<Task<bool>> TableImportTasks = new List<Task<bool>>();
+				var tablesAtLevel = SqlWatchTables.FindAll(s => s.DependencyLevel == i);
+				Logger.LogVerbose($"Processing dependency level {i} with {tablesAtLevel.Count} tables for \"{SqlInstance}\"");
 
-				int depLevels = (SqlWatchTables.Max(s => s.DependencyLevel));
-				for (int i = 1; i <= depLevels; i++)
+				// Process tables at same dependency level in parallel but with hybrid control
+				var levelTasks = tablesAtLevel.Select(async table =>
 				{
-					foreach (var table in SqlWatchTables.FindAll(s => s.DependencyLevel == i))
-					{
-						Task<bool> TableImportTask = ImportTableAsync(
-									table.Name,
-									table.PrimaryKey,
-									table.HasIdentity,
-									table.HasLastSeen,
-									table.HasLastUpdated,
-									table.Joins,
-									table.UpdateColumns,
-									table.AllColumns
-									);
+					return await HybridImportManager.ExecuteWithHybridControl(
+						table.Name,
+						SqlInstance,
+						() => ImportTableAsync(
+							table.Name,
+							table.PrimaryKey,
+							table.HasIdentity,
+							table.HasLastSeen,
+							table.HasLastUpdated,
+							table.Joins,
+							table.UpdateColumns,
+							table.AllColumns
+						)
+					);
+				}).ToArray();
 
-						TableImportTasks.Add(TableImportTask);
-					}
+				var results = await Task.WhenAll(levelTasks);
 
-					Task.WhenAll(TableImportTasks);
-
-					foreach (var result in (TableImportTasks.Select(t => t.Result).ToArray()))
-					{
-						if (result == false)
-						{
-							// If any of the tasks returns false we should break as may not have satisfied all dependencies.
-							// Analogically, if the snapshot header returns zero rows, we will break as no new data to import.
-							i = depLevels + 2;
-						}
-					}
-
+				// Check if any table import failed - if so, break the dependency chain
+				if (results.Any(result => result == false))
+				{
+					Logger.LogWarning($"One or more table imports failed at dependency level {i} for \"{SqlInstance}\". Breaking dependency chain.");
+					break;
 				}
-			});
+
+				Logger.LogVerbose($"Completed dependency level {i} for \"{SqlInstance}\". Concurrency stats: {HybridImportManager.GetConcurrencyStats()}");
+			}
 
 			Logger.LogMessage($"Finished: \"{ SqlInstance }\". Time taken: { sw.Elapsed.TotalMilliseconds }ms");
 			return true;
@@ -360,6 +361,14 @@ namespace SqlWatchImport
 			string SqlInstance = this.SqlInstance;
 
 			Stopwatch tt = Stopwatch.StartNew();
+
+			// Determine if we should use staging approach
+			bool useStaging = HybridImportManager.ShouldUseStaging(tableName);
+			string workingTableName = useStaging ? 
+				$"[#staging_{tableName}_{Environment.MachineName}_{Thread.CurrentThread.ManagedThreadId}]" : 
+				$"[#{ tableName }]";
+
+			Logger.LogVerbose($"Starting import of \"{tableName}\" for \"{SqlInstance}\" using {(useStaging ? "staging" : "direct")} approach");
 
 			using (SqlConnection connectionRepository = new SqlConnection(this.ConnectionStringRepository))
 			{
@@ -508,11 +517,11 @@ namespace SqlWatchImport
 
 								string PkColumns = primaryKeys;
 
-								sql = $"select top 0 * into [#{ tableName }] from { tableName } with (nolock);";
+								sql = $"select top 0 * into {workingTableName} from { tableName } with (nolock);";
 
 								if (PkColumns != "")
 								{
-									sql += $"alter table [#{ tableName }] add primary key ({ PkColumns }); ";
+									sql += $"alter table {workingTableName} add primary key ({ PkColumns }); ";
 								}
 
 								using (SqlCommand commandRepository = new SqlCommand(sql, connectionRepository))
@@ -522,7 +531,7 @@ namespace SqlWatchImport
 									{
 										Stopwatch t = Stopwatch.StartNew();
 										await commandRepository.ExecuteNonQueryAsync();
-										Logger.LogVerbose($"Created landing table \"#{ tableName }\" for \"{ SqlInstance }\" in { t.Elapsed.TotalMilliseconds }ms.");
+										Logger.LogVerbose($"Created landing table \"{workingTableName}\" for \"{ SqlInstance }\" in { t.Elapsed.TotalMilliseconds }ms.");
 									}
 									catch (SqlException e)
 									{
@@ -531,15 +540,36 @@ namespace SqlWatchImport
 									}
 								}
 
-								var options = SqlBulkCopyOptions.KeepIdentity | SqlBulkCopyOptions.TableLock;
+								// Optimize bulk copy options based on table type and staging approach
+								var options = SqlBulkCopyOptions.KeepIdentity;
+								
+								if (tableName.Contains("sqlwatch_logger"))
+								{
+									// Logger tables: Use faster options for append-only data
+									options |= SqlBulkCopyOptions.CheckConstraints;
+								}
+								else if (useStaging)
+								{
+									// Staging tables: Optimize for speed since we'll merge later
+									options |= SqlBulkCopyOptions.TableLock;
+								}
 
 								using (SqlBulkCopy sqlBulkCopy = new SqlBulkCopy(connectionRepository, options, null))
 								{
 
-									sqlBulkCopy.DestinationTableName = $"[#{ tableName }]";
+									sqlBulkCopy.DestinationTableName = workingTableName;
 									sqlBulkCopy.BulkCopyTimeout = Config.BulkCopyTimeout;
 									sqlBulkCopy.EnableStreaming = Config.SqlBkEnableStreaming;
-									sqlBulkCopy.BatchSize = Config.SqlBkBatchSize;
+									
+									// Adjust batch size based on table type
+									if (useStaging && tableName.Contains("sqlwatch_meta"))
+									{
+										sqlBulkCopy.BatchSize = Config.MergeBatchSize;
+									}
+									else
+									{
+										sqlBulkCopy.BatchSize = Config.SqlBkBatchSize;
+									}
 
 									try
 									{
@@ -548,7 +578,7 @@ namespace SqlWatchImport
 										rowsCopied = SqlBulkCopyExtension.RowsCopiedCount(sqlBulkCopy);
 
 										t1 += bk1.Elapsed.TotalMilliseconds;
-										Logger.LogVerbose($"Copied { rowsCopied } { (rowsCopied == 1 ? "row" : "rows") } from \"[{ SqlInstance }].{ tableName }\" to \"{ (tableName == "dbo.sqlwatch_logger_snapshot_header" ? "dbo.sqlwatch_logger_snapshot_header" : $"#{ tableName }") }\" in { bk1.Elapsed.TotalMilliseconds }ms.");
+										Logger.LogVerbose($"Copied { rowsCopied } { (rowsCopied == 1 ? "row" : "rows") } from \"[{ SqlInstance }].{ tableName }\" to \"{workingTableName}\" in { bk1.Elapsed.TotalMilliseconds }ms using {(useStaging ? "staging" : "direct")} approach.");
 									}
 									catch (SqlException e)
 									{
@@ -566,7 +596,7 @@ namespace SqlWatchImport
 					}
 
 					// ------------------------------------------------------------------------------------------------------------------------------
-					// MERGE
+					// OPTIMIZED MERGE with Hybrid Approach
 					// ------------------------------------------------------------------------------------------------------------------------------
 					if (rowsCopied > 0) //&& tableName != "dbo.sqlwatch_logger_snapshot_header")
 					{
@@ -579,13 +609,15 @@ namespace SqlWatchImport
 
 						string allColumns = AllColumns;
 
-						sql += $";merge { tableName } as target ";
+						// Use optimized merge with appropriate lock hints
+						string lockHint = tableName.Contains("sqlwatch_logger") ? "(ROWLOCK, READPAST)" : "(ROWLOCK)";
+						sql += $";merge { tableName } {lockHint} as target ";
 
 						if (tableName.Contains("sqlwatch_logger") == true && tableName != "dbo.sqlwatch_logger_snapshot_header")
 						{
 							sql += $@"
 								using (
-								select s.* from [#{ tableName }] s
+								select s.* from {workingTableName} s
 								inner join dbo.sqlwatch_logger_snapshot_header h
 									on s.[snapshot_time] = h.[snapshot_time]
 									and s.[snapshot_type_id] = h.[snapshot_type_id]
@@ -593,7 +625,7 @@ namespace SqlWatchImport
 						}
 						else
 						{
-							sql += $"using [#{ tableName }] as source";
+							sql += $"using {workingTableName} as source";
 						}
 
 						sql += $@"
@@ -620,6 +652,12 @@ namespace SqlWatchImport
 							sql += $"\nset identity_insert { tableName } off;";
 						}
 
+						// Add cleanup for staging tables
+						if (useStaging)
+						{
+							sql += $"\ndrop table {workingTableName};";
+						}
+
 						using (SqlCommand cmdMergeTable = new SqlCommand(sql, connectionRepository))
 						{
 							cmdMergeTable.CommandTimeout = Config.BulkCopyTimeout;
@@ -630,7 +668,7 @@ namespace SqlWatchImport
 								int nRows = await cmdMergeTable.ExecuteNonQueryAsync();
 								t2 += mg.Elapsed.TotalMilliseconds;
 
-								Logger.LogVerbose($"Merged { nRows } { (nRows == 1 ? "row" : "rows") } from \"#{ tableName }\" for \"{ SqlInstance }\" in { mg.Elapsed.TotalMilliseconds }ms");
+								Logger.LogVerbose($"Merged { nRows } { (nRows == 1 ? "row" : "rows") } from \"{workingTableName}\" for \"{ SqlInstance }\" in { mg.Elapsed.TotalMilliseconds }ms using {(useStaging ? "staging" : "direct")} approach");
 								Logger.LogSuccess($"Imported \"{ tableName }\" from \"{ SqlInstance }\" in { tt.Elapsed.TotalMilliseconds }ms");
 
 								return true;
@@ -649,7 +687,7 @@ namespace SqlWatchImport
 
 								if (Config.dumpOnError == true)
 								{
-									sql = $"select * into [_DUMP_{ string.Format("{0:yyyyMMddHHmmssfff}", DateTime.Now) }_{ SqlInstance }.{ tableName }] from [#{ tableName }]";
+									sql = $"select * into [_DUMP_{ string.Format("{0:yyyyMMddHHmmssfff}", DateTime.Now) }_{ SqlInstance }.{ tableName }] from {workingTableName}";
 									using (SqlCommand cmdDumpData = new SqlCommand(sql, connectionRepository))
 									{
 										try

@@ -16,7 +16,7 @@ namespace SqlWatchImport
 	
 	class Program
     {
-		static void Main(string[] args)
+		static async Task Main(string[] args)
         {
 
 			#region prerun config
@@ -106,15 +106,17 @@ namespace SqlWatchImport
 						Logger.LogMessage($"Got { RemoteInstances.Count } { (RemoteInstances.Count == 1 ? "instance" : "instances") } to import");
 						Logger.LogMessage($"Got { SqlWatchTables.Count } { (SqlWatchTables.Count == 1 ? "table" : "tables") } to import from each instance");
 
+						// Enhanced thread management for Hybrid Approach
 						if (Config.MinThreads > 0)
 						{
 							ThreadPool.SetMinThreads(Config.MinThreads, Config.MinThreads);
 						}
 						else if (Config.MinThreads == -1)
                         {
-							int minThreads = SqlWatchTables.Count * RemoteInstances.Count;
+							// For hybrid approach, be more conservative with auto-scaling
+							int minThreads = Math.Min(Config.GlobalConcurrencyLimit * 2, SqlWatchTables.Count * RemoteInstances.Count);
 							ThreadPool.SetMinThreads(minThreads, minThreads);
-							Logger.LogVerbose($"Automatically setting MinThreads to { minThreads }");
+							Logger.LogVerbose($"Automatically setting MinThreads to { minThreads } (limited by GlobalConcurrencyLimit)");
 						}
 
 						if (Config.MaxThreads != 0)
@@ -122,46 +124,51 @@ namespace SqlWatchImport
 							ThreadPool.SetMaxThreads(Config.MaxThreads, Config.MaxThreads);
 						}
 
-						Parallel.ForEach(RemoteInstances, RemoteInstance =>
+						Logger.LogMessage($"Using Hybrid Import Approach with Global Concurrency Limit: {Config.GlobalConcurrencyLimit}");
+						Logger.LogMessage($"Table Concurrency - Logger: {Config.LoggerTableConcurrency}, Meta: {Config.MetaTableConcurrency}, Default: {Config.DefaultTableConcurrency}");
+
+						// Use async/await pattern instead of Parallel.ForEach for better control
+						var importTasks = RemoteInstances.Select(async RemoteInstance =>
 						{
-
-							Task RemoteImportTask = Task.Run(async () =>
+							using (SqlWatchInstance SqlWatchRemote = new SqlWatchInstance())
 							{
-								using (SqlWatchInstance SqlWatchRemote = new SqlWatchInstance())
-								{
-									SqlWatchRemote.SqlInstance = RemoteInstance.SqlInstance;
-									SqlWatchRemote.SqlDatabase = RemoteInstance.SqlDatabase;
-									SqlWatchRemote.SqlUser = RemoteInstance.SqlUser;
-									SqlWatchRemote.SqlSecret = RemoteInstance.SqlSecret;
-									SqlWatchRemote.Hostname = RemoteInstance.Hostname;
-									SqlWatchRemote.ConnectionStringRepository = SqlWatchRepository.ConnectionString;
+								SqlWatchRemote.SqlInstance = RemoteInstance.SqlInstance;
+								SqlWatchRemote.SqlDatabase = RemoteInstance.SqlDatabase;
+								SqlWatchRemote.SqlUser = RemoteInstance.SqlUser;
+								SqlWatchRemote.SqlSecret = RemoteInstance.SqlSecret;
+								SqlWatchRemote.Hostname = RemoteInstance.Hostname;
+								SqlWatchRemote.ConnectionStringRepository = SqlWatchRepository.ConnectionString;
 
-									string VersionRemote = (SqlWatchRemote.GetVersion()).Result;
-									Logger.LogVerbose($"\"{RemoteInstance.SqlInstance}\" SQLWATCH Version: \"{VersionRemote}\"");
+								string VersionRemote = (SqlWatchRemote.GetVersion()).Result;
+								Logger.LogVerbose($"\"{RemoteInstance.SqlInstance}\" SQLWATCH Version: \"{VersionRemote}\"");
 
-									if (VersionRepository == VersionRemote)
-                                    {
-										await SqlWatchRemote.ImportAsync(SqlWatchTables);
-									}
-									else
-                                    {
-										Logger.LogError($"Version mismatch. The central repository and the remote instance must have the same version of SQLWATCH installed. " +
-											$"The Central Repository is {VersionRepository} and the remote instance \"{RemoteInstance.SqlInstance}\" is {VersionRemote} ");
-                                    }
-									
+								if (VersionRepository == VersionRemote)
+                                {
+									return await SqlWatchRemote.ImportAsync(SqlWatchTables);
 								}
-							});
-							RemoteImportTasks.Add(RemoteImportTask);
-						});
+								else
+                                {
+									Logger.LogError($"Version mismatch. The central repository and the remote instance must have the same version of SQLWATCH installed. " +
+										$"The Central Repository is {VersionRepository} and the remote instance \"{RemoteInstance.SqlInstance}\" is {VersionRemote} ");
+									return false;
+                                }
+							}
+						}).ToArray();
 
 						try
 						{
-							Task results = Task.WhenAll(RemoteImportTasks.Where(t => t != null).ToArray());
-							results.Wait();
+							var results = await Task.WhenAll(importTasks);
+							var successCount = results.Count(r => r);
+							Logger.LogMessage($"Import completed: {successCount}/{results.Length} instances successful");
 						}
 						catch (Exception e)
 						{
 							Logger.LogError(e.ToString());
+						}
+						finally
+						{
+							// Cleanup hybrid resources
+							HybridImportManager.Dispose();
 						}
 					}
 				}
