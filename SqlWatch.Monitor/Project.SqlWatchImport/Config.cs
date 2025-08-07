@@ -56,6 +56,11 @@ namespace SqlWatchImport
 		public static int StaggerDelayMinMs = int.Parse(ConfigurationManager.AppSettings["StaggerDelayMinMs"]);
 		public static int StaggerDelayMaxMs = int.Parse(ConfigurationManager.AppSettings["StaggerDelayMaxMs"]);
 
+		// Performance Optimization Thresholds
+		public static int LargeDatasetThreshold = 10000; // Rows threshold for large dataset optimizations
+		public static int VeryLargeDatasetThreshold = 50000; // Rows threshold for very large dataset handling
+		public static int LargeDatasetMinTimeout = 1800; // Minimum timeout in seconds for very large datasets
+
 		// Other
 		public static string textDivider = "------------------------------------------------------------------------";
 		public static string tsplaceholder = "                        ";

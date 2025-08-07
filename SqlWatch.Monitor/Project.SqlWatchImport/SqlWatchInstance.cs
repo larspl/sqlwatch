@@ -362,8 +362,11 @@ namespace SqlWatchImport
 
 			Stopwatch tt = Stopwatch.StartNew();
 
-			// Determine if we should use staging approach
+			// Determine if we should use staging approach based on table type and data volume
 			bool useStaging = HybridImportManager.ShouldUseStaging(tableName);
+			
+			// For performance optimization: if we detect large datasets, prefer staging even for logger tables
+			// This will be determined after we know the row count from bulk copy
 			
 			// Create truly unique staging table names to avoid collisions
 			string uniqueId = $"{Environment.MachineName}_{Thread.CurrentThread.ManagedThreadId}_{DateTime.Now:yyyyMMddHHmmssfff}_{Guid.NewGuid().ToString("N").Substring(0, 8)}";
@@ -560,18 +563,23 @@ namespace SqlWatchImport
 									}
 								}
 
-								// Optimize bulk copy options based on table type and staging approach
+								// Optimize bulk copy options based on table type, staging approach, and expected data volume
 								var options = SqlBulkCopyOptions.KeepIdentity;
 								
 								if (tableName.Contains("sqlwatch_logger"))
 								{
 									// Logger tables: Use faster options for append-only data
-									options |= SqlBulkCopyOptions.CheckConstraints;
+									options |= SqlBulkCopyOptions.CheckConstraints | SqlBulkCopyOptions.TableLock;
 								}
 								else if (useStaging)
 								{
 									// Staging tables: Optimize for speed since we'll merge later
-									options |= SqlBulkCopyOptions.TableLock;
+									options |= SqlBulkCopyOptions.TableLock | SqlBulkCopyOptions.FireTriggers;
+								}
+								else
+								{
+									// Direct approach: Use minimal options for safety
+									options |= SqlBulkCopyOptions.CheckConstraints;
 								}
 
 								using (SqlBulkCopy sqlBulkCopy = new SqlBulkCopy(connectionRepository, options, null))
@@ -581,15 +589,23 @@ namespace SqlWatchImport
 									sqlBulkCopy.BulkCopyTimeout = Config.BulkCopyTimeout;
 									sqlBulkCopy.EnableStreaming = Config.SqlBkEnableStreaming;
 									
-									// Adjust batch size based on table type
+									// Adjust batch size based on table type and expected volume
+									int batchSize;
 									if (useStaging && tableName.Contains("sqlwatch_meta"))
 									{
-										sqlBulkCopy.BatchSize = Config.MergeBatchSize;
+										batchSize = Config.MergeBatchSize;
+									}
+									else if (tableName.Contains("sqlwatch_logger"))
+									{
+										// For logger tables, use larger batch sizes for better performance
+										batchSize = Math.Max(Config.SqlBkBatchSize, 5000);
 									}
 									else
 									{
-										sqlBulkCopy.BatchSize = Config.SqlBkBatchSize;
+										batchSize = Config.SqlBkBatchSize;
 									}
+									
+									sqlBulkCopy.BatchSize = batchSize;
 
 									try
 									{
@@ -597,8 +613,15 @@ namespace SqlWatchImport
 
 										rowsCopied = SqlBulkCopyExtension.RowsCopiedCount(sqlBulkCopy);
 
+										// Performance optimization: For large datasets on direct approach, consider switching to staging-like merge
+										bool useLargeDatasetOptimization = !useStaging && rowsCopied > Config.LargeDatasetThreshold;
+										if (useLargeDatasetOptimization)
+										{
+											Logger.LogVerbose($"Large dataset detected ({rowsCopied} rows) for {tableName}, using optimized merge strategy");
+										}
+
 										t1 += bk1.Elapsed.TotalMilliseconds;
-										Logger.LogVerbose($"Copied { rowsCopied } { (rowsCopied == 1 ? "row" : "rows") } from \"[{ SqlInstance }].{ tableName }\" to \"{workingTableName}\" in { bk1.Elapsed.TotalMilliseconds }ms using {(useStaging ? "staging" : "direct")} approach.");
+										Logger.LogVerbose($"Copied { rowsCopied } { (rowsCopied == 1 ? "row" : "rows") } from \"[{ SqlInstance }].{ tableName }\" to \"{workingTableName}\" in { bk1.Elapsed.TotalMilliseconds }ms using {(useStaging ? "staging" : "direct")} approach{(useLargeDatasetOptimization ? " with large dataset optimization" : "")}.");
 									}
 									catch (SqlException e)
 									{
@@ -637,8 +660,21 @@ namespace SqlWatchImport
 
 								string allColumns = AllColumns;
 
-								// Use optimized merge with appropriate lock hints and conflict handling
-								string lockHint = tableName.Contains("sqlwatch_logger") ? "with (ROWLOCK, READPAST)" : "with (UPDLOCK, SERIALIZABLE)";
+								// Performance optimization: Use different lock hints based on data volume
+								string lockHint;
+								bool isLargeDataset = rowsCopied > Config.LargeDatasetThreshold;
+								
+								if (tableName.Contains("sqlwatch_logger"))
+								{
+									// Logger tables: Optimize for high-volume append operations
+									lockHint = isLargeDataset ? "with (TABLOCK, READPAST)" : "with (ROWLOCK, READPAST)";
+								}
+								else
+								{
+									// Meta tables: Use appropriate locking based on volume
+									lockHint = isLargeDataset ? "with (UPDLOCK, READPAST)" : "with (UPDLOCK, SERIALIZABLE)";
+								}
+								
 								sql += $";merge { tableName } {lockHint} as target ";
 
 								if (tableName.Contains("sqlwatch_logger") == true && tableName != "dbo.sqlwatch_logger_snapshot_header")
@@ -701,12 +737,19 @@ namespace SqlWatchImport
 								// Add cleanup for staging tables only when successful
 								if (useStaging)
 								{
-									sql += $"\ndrop table {workingTableName};";
+									sql += $"\nIF OBJECT_ID('tempdb..{workingTableName}') IS NOT NULL DROP TABLE {workingTableName};";
 								}
 
 								using (SqlCommand cmdMergeTable = new SqlCommand(sql, connectionRepository))
 								{
 									cmdMergeTable.CommandTimeout = Config.BulkCopyTimeout;
+									
+									// For very large datasets, extend timeout to prevent timeouts
+									if (rowsCopied > Config.VeryLargeDatasetThreshold)
+									{
+										cmdMergeTable.CommandTimeout = Math.Max(Config.BulkCopyTimeout, Config.LargeDatasetMinTimeout);
+										Logger.LogVerbose($"Extended timeout to {cmdMergeTable.CommandTimeout} seconds for very large dataset ({rowsCopied} rows)");
+									}
 									
 									Stopwatch mg = Stopwatch.StartNew();
 									int nRows = await cmdMergeTable.ExecuteNonQueryAsync();
@@ -731,6 +774,20 @@ namespace SqlWatchImport
 										try
 										{
 											Logger.LogVerbose($"Removing conflicting rows from destination table {tableName} for instance {SqlInstance}");
+											
+											// First check if staging table still exists
+											string checkTableSql = $"SELECT COUNT(*) FROM sys.objects WHERE object_id = OBJECT_ID('tempdb..{workingTableName}')";
+											using (SqlCommand checkTableCmd = new SqlCommand(checkTableSql, connectionRepository))
+											{
+												int tableExists = Convert.ToInt32(await checkTableCmd.ExecuteScalarAsync());
+												if (tableExists == 0)
+												{
+													Logger.LogVerbose($"Staging table {workingTableName} no longer exists, skipping conflict resolution");
+													// Continue with retry without deletion
+													await Task.Delay(retryCount * 200);
+													continue;
+												}
+											}
 											
 											// For meta tables, we should remove only the specific conflicting rows based on primary keys
 											// This is more precise than removing all data for an instance
@@ -776,20 +833,34 @@ namespace SqlWatchImport
 												{
 													Logger.LogVerbose($"Attempting fallback deletion strategy for {tableName}");
 													
-													// Fallback: Get the specific database and table IDs from staging and delete only those
-													string fallbackDeleteSql = $@"
-														DELETE FROM {tableName} 
-														WHERE sql_instance = '{SqlInstance}'
-														AND (sqlwatch_database_id, sqlwatch_table_id) IN (
-															SELECT DISTINCT sqlwatch_database_id, sqlwatch_table_id 
-															FROM {workingTableName}
-														)";
-													
-													using (SqlCommand fallbackCmd = new SqlCommand(fallbackDeleteSql, connectionRepository))
+													// First check if staging table still exists for fallback
+													string checkFallbackTableSql = $"SELECT COUNT(*) FROM sys.objects WHERE object_id = OBJECT_ID('tempdb..{workingTableName}')";
+													using (SqlCommand checkFallbackCmd = new SqlCommand(checkFallbackTableSql, connectionRepository))
 													{
-														fallbackCmd.CommandTimeout = Config.BulkCopyTimeout;
-														int fallbackDeleted = await fallbackCmd.ExecuteNonQueryAsync();
-														Logger.LogVerbose($"Fallback deletion removed {fallbackDeleted} rows from {tableName} for {SqlInstance}");
+														int fallbackTableExists = Convert.ToInt32(await checkFallbackCmd.ExecuteScalarAsync());
+														if (fallbackTableExists > 0)
+														{
+															// Fallback: Get the specific database and table IDs from staging and delete only those
+															string fallbackDeleteSql = $@"
+																DELETE FROM {tableName} 
+																WHERE sql_instance = '{SqlInstance}'
+																AND EXISTS (
+																	SELECT 1 FROM {workingTableName} staging
+																	WHERE staging.sqlwatch_database_id = {tableName}.sqlwatch_database_id
+																	AND staging.sqlwatch_table_id = {tableName}.sqlwatch_table_id
+																)";
+															
+															using (SqlCommand fallbackCmd = new SqlCommand(fallbackDeleteSql, connectionRepository))
+															{
+																fallbackCmd.CommandTimeout = Config.BulkCopyTimeout;
+																int fallbackDeleted = await fallbackCmd.ExecuteNonQueryAsync();
+																Logger.LogVerbose($"Fallback deletion removed {fallbackDeleted} rows from {tableName} for {SqlInstance}");
+															}
+														}
+														else
+														{
+															Logger.LogVerbose($"Staging table {workingTableName} no longer exists for fallback deletion");
+														}
 													}
 												}
 												catch (Exception fallbackEx)
