@@ -93,7 +93,7 @@ namespace SqlWatchImport
 		{
 			// Get list of tables first:
 			string sql = @"select stuff(( 
-						select ' union all select top 1 TABLE_NAME=''' + TABLE_NAME + ''', snapshot_type_id from ' +  + '.' + TABLE_NAME
+						select ' union all select top 1 TABLE_NAME=''' + TABLE_NAME + ''', snapshot_type_id from ' + TABLE_NAME
 						from (
 							select distinct TABLE_NAME=TABLE_SCHEMA + '.' + TABLE_NAME
 							from INFORMATION_SCHEMA.COLUMNS
@@ -364,8 +364,13 @@ namespace SqlWatchImport
 
 			// Determine if we should use staging approach
 			bool useStaging = HybridImportManager.ShouldUseStaging(tableName);
+			
+			// Create truly unique staging table names to avoid collisions
+			string uniqueId = $"{Environment.MachineName}_{Thread.CurrentThread.ManagedThreadId}_{DateTime.Now:yyyyMMddHHmmssfff}_{Guid.NewGuid().ToString("N").Substring(0, 8)}";
+			string safeInstanceName = SqlInstance.Replace("\\", "_").Replace(".", "_").Replace("-", "_");
+			
 			string workingTableName = useStaging ? 
-				$"[#staging_{tableName}_{Environment.MachineName}_{Thread.CurrentThread.ManagedThreadId}]" : 
+				$"[#staging_{tableName.Replace("dbo.", "")}_{safeInstanceName}_{uniqueId}]" : 
 				$"[#{ tableName }]";
 
 			Logger.LogVerbose($"Starting import of \"{tableName}\" for \"{SqlInstance}\" using {(useStaging ? "staging" : "direct")} approach");
@@ -519,7 +524,9 @@ namespace SqlWatchImport
 
 								sql = $"select top 0 * into {workingTableName} from { tableName } with (nolock);";
 
-								if (PkColumns != "")
+								// For staging tables, don't add primary key constraint to allow duplicates during staging
+								// We'll handle deduplication during the merge process
+								if (PkColumns != "" && !useStaging)
 								{
 									sql += $"alter table {workingTableName} add primary key ({ PkColumns }); ";
 								}
@@ -610,7 +617,7 @@ namespace SqlWatchImport
 						string allColumns = AllColumns;
 
 						// Use optimized merge with appropriate lock hints
-						string lockHint = tableName.Contains("sqlwatch_logger") ? "(ROWLOCK, READPAST)" : "(ROWLOCK)";
+						string lockHint = tableName.Contains("sqlwatch_logger") ? "with (ROWLOCK, READPAST)" : "with (ROWLOCK)";
 						sql += $";merge { tableName } {lockHint} as target ";
 
 						if (tableName.Contains("sqlwatch_logger") == true && tableName != "dbo.sqlwatch_logger_snapshot_header")
@@ -622,6 +629,24 @@ namespace SqlWatchImport
 									on s.[snapshot_time] = h.[snapshot_time]
 									and s.[snapshot_type_id] = h.[snapshot_type_id]
 									and s.[sql_instance] = h.[sql_instance]) as source";
+						}
+						else if (useStaging)
+						{
+							// For staging tables, add deduplication to prevent constraint violations
+							string primaryKeyColumns = primaryKeys;
+							if (!string.IsNullOrEmpty(primaryKeyColumns))
+							{
+								sql += $@"using (
+									select * from (
+										select *, row_number() over (partition by {primaryKeyColumns} order by (select null)) as rn
+										from {workingTableName}
+									) deduped where rn = 1
+								) as source";
+							}
+							else
+							{
+								sql += $"using {workingTableName} as source";
+							}
 						}
 						else
 						{
