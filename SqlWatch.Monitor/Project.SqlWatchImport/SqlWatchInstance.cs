@@ -58,6 +58,7 @@ namespace SqlWatchImport
 			public string Hostname { get; set; }
 			public string SqlUser { get; set; }
 			public string SqlSecret { get; set; }
+			public string Environment { get; set; }
 		}
 
 		public class SqlWatchTable
@@ -144,8 +145,15 @@ namespace SqlWatchImport
 									, SqlSecret=isnull([sql_secret],'')
 									, SqlUser=isnull([sql_user],'')
 									, SqlWatchDatabase = [sqlwatch_database_name]
+									, Environment = isnull([environment],'')
 							from [dbo].[sqlwatch_config_sql_instance]
 							where repo_collector_is_active = 1";
+
+			// Add environment filter if not "ALL"
+			if (Config.EnvironmentToProcess != "ALL")
+			{
+				sql += " and isnull([environment],'') = @EnvironmentToProcess";
+			}
 
 			List<RemoteInstance> RemoteSqlInstance = new List<RemoteInstance>();
 
@@ -153,6 +161,12 @@ namespace SqlWatchImport
 			{
 				using (SqlCommand command = new SqlCommand(sql, connection))
 				{
+					// Add parameter if filtering by specific environment
+					if (Config.EnvironmentToProcess != "ALL")
+					{
+						command.Parameters.AddWithValue("@EnvironmentToProcess", Config.EnvironmentToProcess);
+					}
+
 					await connection.OpenAsync();
 					SqlDataReader reader = await command.ExecuteReaderAsync();
 
@@ -166,7 +180,8 @@ namespace SqlWatchImport
 								SqlDatabase = reader["SqlWatchDatabase"].ToString(),
 								Hostname = reader["Hostname"].ToString(),
 								SqlUser = reader["SqlUser"].ToString(),
-								SqlSecret = reader["SqlSecret"].ToString()
+								SqlSecret = reader["SqlSecret"].ToString(),
+								Environment = reader["Environment"].ToString()
 							};
 
 							RemoteSqlInstance.Add(RemoteInstance);
