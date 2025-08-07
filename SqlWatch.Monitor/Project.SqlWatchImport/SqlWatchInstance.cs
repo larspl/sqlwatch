@@ -367,10 +367,12 @@ namespace SqlWatchImport
 			
 			// Create truly unique staging table names to avoid collisions
 			string uniqueId = $"{Environment.MachineName}_{Thread.CurrentThread.ManagedThreadId}_{DateTime.Now:yyyyMMddHHmmssfff}_{Guid.NewGuid().ToString("N").Substring(0, 8)}";
-			string safeInstanceName = SqlInstance.Replace("\\", "_").Replace(".", "_").Replace("-", "_");
+			// Clean up special characters that could cause SQL issues
+			string safeInstanceName = SqlInstance.Replace("\\", "_").Replace(".", "_").Replace("-", "_").Replace(" ", "_").Replace("[", "").Replace("]", "");
+			string safeTableName = tableName.Replace("dbo.", "").Replace("[", "").Replace("]", "");
 			
 			string workingTableName = useStaging ? 
-				$"[#staging_{tableName.Replace("dbo.", "")}_{safeInstanceName}_{uniqueId}]" : 
+				$"[#stg_{safeTableName}_{safeInstanceName}_{DateTime.Now:yyyyMMddHHmmss}_{Thread.CurrentThread.ManagedThreadId}]" : 
 				$"[#{ tableName }]";
 
 			Logger.LogVerbose($"Starting import of \"{tableName}\" for \"{SqlInstance}\" using {(useStaging ? "staging" : "direct")} approach");
@@ -521,6 +523,15 @@ namespace SqlWatchImport
 								}
 
 								string PkColumns = primaryKeys;
+
+								// Ensure staging table name doesn't exceed SQL Server limits (128 characters)
+								if (workingTableName.Length > 128)
+								{
+									string shortId = $"{DateTime.Now:yyyyMMddHHmmss}_{Thread.CurrentThread.ManagedThreadId}";
+									workingTableName = useStaging ? 
+										$"[#stg_{safeTableName.Substring(0, Math.Min(20, safeTableName.Length))}_{shortId}]" : 
+										$"[#{ tableName }]";
+								}
 
 								sql = $"select top 0 * into {workingTableName} from { tableName } with (nolock);";
 
@@ -710,19 +721,47 @@ namespace SqlWatchImport
 									if (retryCount <= maxRetries)
 									{
 										Logger.LogVerbose($"Unique constraint violation on \"{tableName}\" for \"{SqlInstance}\", retry {retryCount}/{maxRetries}. Waiting {retryCount * 100}ms...");
+										
+										// Clean up staging table before retry
+										if (useStaging)
+										{
+											try
+											{
+												string dropStagingSql = $"IF OBJECT_ID('{workingTableName}', 'U') IS NOT NULL DROP TABLE {workingTableName};";
+												using (SqlCommand dropCmd = new SqlCommand(dropStagingSql, connectionRepository))
+												{
+													dropCmd.CommandTimeout = Config.BulkCopyTimeout;
+													await dropCmd.ExecuteNonQueryAsync();
+													Logger.LogVerbose($"Dropped staging table {workingTableName} before retry");
+												}
+											}
+											catch (Exception dropEx)
+											{
+												Logger.LogVerbose($"Warning: Could not drop staging table {workingTableName}: {dropEx.Message}");
+											}
+										}
+										
 										await Task.Delay(retryCount * 100); // Progressive delay
 										continue;
 									}
 									
 									// If all retries failed, check if the data already exists (acceptable scenario)
-									string checkSql = $"SELECT COUNT(*) FROM {tableName} WHERE {Joins.Replace("target.", "").Replace("source.", "")}";
+									// For complex joins, just check if we have any data for this instance in the target table
+									string checkSql = $"SELECT COUNT(*) FROM {tableName} WHERE sql_instance = '{SqlInstance}'";
 									using (SqlCommand checkCmd = new SqlCommand(checkSql, connectionRepository))
 									{
-										var existingCount = await checkCmd.ExecuteScalarAsync();
-										if (Convert.ToInt32(existingCount) > 0)
+										try
 										{
-											Logger.LogVerbose($"Data already exists in \"{tableName}\" for \"{SqlInstance}\", treating as successful import");
-											return true;
+											var existingCount = await checkCmd.ExecuteScalarAsync();
+											if (Convert.ToInt32(existingCount) > 0)
+											{
+												Logger.LogVerbose($"Data already exists in \"{tableName}\" for \"{SqlInstance}\", treating as successful import");
+												return true;
+											}
+										}
+										catch (Exception checkEx)
+										{
+											Logger.LogVerbose($"Could not verify existing data in \"{tableName}\" for \"{SqlInstance}\": {checkEx.Message}");
 										}
 									}
 									
