@@ -693,12 +693,23 @@ namespace SqlWatchImport
 									string primaryKeyColumns = primaryKeys;
 									if (!string.IsNullOrEmpty(primaryKeyColumns))
 									{
-										sql += $@"using (
-											select * from (
-												select *, row_number() over (partition by {primaryKeyColumns} order by (select null)) as rn
-												from {workingTableName}
-											) deduped where rn = 1
-										) as source";
+										// Performance optimization: For large datasets, use more efficient deduplication
+										if (rowsCopied > Config.LargeDatasetThreshold)
+										{
+											sql += $@"using (
+												select * from (
+													select *, row_number() over (partition by {primaryKeyColumns} order by (select null)) as rn
+													from {workingTableName}
+												) deduped where rn = 1
+											) as source";
+										}
+										else
+										{
+											// For smaller datasets, use simpler approach
+											sql += $@"using (
+												select distinct * from {workingTableName}
+											) as source";
+										}
 									}
 									else
 									{
