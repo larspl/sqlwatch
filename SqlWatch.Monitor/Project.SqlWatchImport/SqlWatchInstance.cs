@@ -698,7 +698,7 @@ namespace SqlWatchImport
 									sql += $"\nset identity_insert { tableName } off;";
 								}
 
-								// Add cleanup for staging tables
+								// Add cleanup for staging tables only when successful
 								if (useStaging)
 								{
 									sql += $"\ndrop table {workingTableName};";
@@ -800,20 +800,11 @@ namespace SqlWatchImport
 										}
 									}
 									
-									// Clean up any existing staging table
-									try
+									// DON'T clean up staging table on retry - preserve for debugging
+									// Only create new staging table if we're retrying
+									if (retryCount > 1)
 									{
-										string cleanupSql = $"IF OBJECT_ID('{workingTableName}', 'U') IS NOT NULL DROP TABLE {workingTableName};";
-										using (SqlCommand cleanupCmd = new SqlCommand(cleanupSql, connectionRepository))
-										{
-											cleanupCmd.CommandTimeout = Config.BulkCopyTimeout;
-											await cleanupCmd.ExecuteNonQueryAsync();
-											Logger.LogVerbose($"Cleaned up staging table {workingTableName} before retry");
-										}
-									}
-									catch (Exception cleanupEx)
-									{
-										Logger.LogVerbose($"Warning: Could not cleanup staging table {workingTableName}: {cleanupEx.Message}");
+										Logger.LogVerbose($"Preserving staging table {workingTableName} for debugging, creating new one for retry");
 									}
 
 									// Create new unique staging table name for retry
@@ -891,7 +882,57 @@ namespace SqlWatchImport
 									continue;
 								}
 								
-								// If all retries failed, check if the data already exists (acceptable scenario)
+								// If all retries failed, try one final full load approach for meta tables
+								if (tableName.Contains("sqlwatch_meta"))
+								{
+									Logger.LogWarning($"All retries failed for {tableName}. Attempting emergency full load for {SqlInstance}...");
+									
+									try
+									{
+										// Save current fullLoad setting
+										bool originalFullLoad = Config.fullLoad;
+										
+										// Temporarily enable full load
+										Config.fullLoad = true;
+										Logger.LogVerbose($"Enabled full load mode for emergency recovery of {tableName}");
+										
+										// Clear all existing data for this instance from the target table for meta tables only
+										if (tableName.Contains("sqlwatch_meta"))
+										{
+											string clearSql = $"DELETE FROM {tableName} WHERE sql_instance = '{SqlInstance}'";
+											using (SqlCommand clearCmd = new SqlCommand(clearSql, connectionRepository))
+											{
+												clearCmd.CommandTimeout = Config.BulkCopyTimeout;
+												int clearedRows = await clearCmd.ExecuteNonQueryAsync();
+												Logger.LogVerbose($"Emergency full load: Cleared {clearedRows} existing rows from {tableName} for {SqlInstance}");
+											}
+										}
+										
+										// Recursively call this method with full load enabled
+										bool fullLoadResult = await ImportTableAsync(tableName, primaryKeys, HasIdentity, HasLastSeen, HasLastUpdated, Joins, UpdateColumns, AllColumns);
+										
+										// Restore original fullLoad setting
+										Config.fullLoad = originalFullLoad;
+										
+										if (fullLoadResult)
+										{
+											Logger.LogWarning($"Emergency full load succeeded for {tableName} on {SqlInstance}");
+											return true;
+										}
+										else
+										{
+											Logger.LogError($"Emergency full load also failed for {tableName} on {SqlInstance}");
+										}
+									}
+									catch (Exception fullLoadEx)
+									{
+										Logger.LogError($"Emergency full load failed for {tableName} on {SqlInstance}: {fullLoadEx.Message}");
+										// Restore original fullLoad setting even on exception
+										Config.fullLoad = false;
+									}
+								}
+								
+								// If data doesn't exist, it's a real error
 								string checkSql = $"SELECT COUNT(*) FROM {tableName} WHERE sql_instance = '{SqlInstance}'";
 								using (SqlCommand checkCmd = new SqlCommand(checkSql, connectionRepository))
 								{
@@ -929,10 +970,13 @@ namespace SqlWatchImport
 								{
 									try
 									{
-										sql = $"select * into [_DUMP_{ string.Format("{0:yyyyMMddHHmmssfff}", DateTime.Now) }_{ SqlInstance }.{ tableName }] from {workingTableName}";
+										string dumpTableName = $"[_DUMP_{ string.Format("{0:yyyyMMddHHmmssfff}", DateTime.Now) }_{SqlInstance.Replace("\\", "_").Replace(".", "_")}_{tableName.Replace("dbo.", "").Replace("[", "").Replace("]", "")}]";
+										sql = $"select * into {dumpTableName} from {workingTableName}";
 										using (SqlCommand cmdDumpData = new SqlCommand(sql, connectionRepository))
 										{
+											cmdDumpData.CommandTimeout = Config.BulkCopyTimeout;
 											cmdDumpData.ExecuteNonQuery();
+											Logger.LogVerbose($"Dumped staging data to {dumpTableName} for debugging");
 										}
 									}
 									catch (SqlException x)
@@ -940,6 +984,10 @@ namespace SqlWatchImport
 										Logger.LogError("Failed to dump data into a table for debugging. This was not expected.", x.Errors[0].Message, sql);
 									}
 								}
+								
+								// Preserve staging table for debugging - don't drop it
+								Logger.LogVerbose($"Preserving staging table {workingTableName} for debugging purposes");
+								
 								return false;
 							}
 						}
