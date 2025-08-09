@@ -52,10 +52,13 @@
     <Compile Include="Config.cs" />
     <Compile Include="Extensions.cs" />
     <Compile Include="HybridImportManager.cs" />
+    <Compile Include="ImportQueue.cs" />
     <Compile Include="Logger.cs" />
     <Compile Include="Options.cs" />
     <Compile Include="Program.cs" />
+    <Compile Include="ProgramQueueIntegration.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="SmartLoadStrategy.cs" />
     <Compile Include="SqlWatchInstance.cs" />
     <Compile Include="Tools.cs" />
   </ItemGroup>

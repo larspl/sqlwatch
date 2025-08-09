@@ -13,7 +13,7 @@ using System.Web.Caching;
 
 namespace SqlWatchImport
 {
-	class SqlWatchInstance : IDisposable
+	public class SqlWatchInstance : IDisposable
 	{
 
 		public static double t1 = 0; // Total time ms spent on bulk copy full load;
@@ -771,6 +771,24 @@ namespace SqlWatchImport
 
 									return true;
 								}
+							}
+							catch (SqlException e) when (e.Number == -2) // Timeout expired
+							{
+								retryCount++;
+								if (retryCount <= maxRetries)
+								{
+									// For timeout errors, extend the timeout and retry
+									Logger.LogVerbose($"Timeout occurred on \"{tableName}\" for \"{SqlInstance}\", retry {retryCount}/{maxRetries}. Extending timeout and waiting {retryCount * 500}ms...");
+									
+									// Don't recreate staging table for timeout - just extend timeout and retry
+									await Task.Delay(retryCount * 500); // Longer delay for timeout retries
+									continue;
+								}
+								
+								// If all retries failed due to timeout, log specific timeout error
+								string timeoutMessage = $"Merge operation timed out for table \"[{ SqlInstance }].{ tableName }\" after {maxRetries} retries";
+								Logger.LogError(timeoutMessage, e.Message, sql);
+								return false;
 							}
 							catch (SqlException e) when (e.Number == 2627 || e.Number == 2601) // Unique constraint violations
 							{

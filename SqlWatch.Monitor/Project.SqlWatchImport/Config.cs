@@ -61,6 +61,22 @@ namespace SqlWatchImport
 		public static int VeryLargeDatasetThreshold = 50000; // Rows threshold for very large dataset handling
 		public static int LargeDatasetMinTimeout = 1800; // Minimum timeout in seconds for very large datasets
 
+		// Queue-Based Processing (inspired by SQLWATCH T-SQL architecture)
+		public static bool UseQueueBasedProcessing = bool.Parse(ConfigurationManager.AppSettings.Get("UseQueueBasedProcessing") ?? "false");
+		public static int QueueProcessingBatchSize = int.Parse(ConfigurationManager.AppSettings.Get("QueueProcessingBatchSize") ?? "100");
+		public static int QueueRetryAttempts = int.Parse(ConfigurationManager.AppSettings.Get("QueueRetryAttempts") ?? "3");
+		public static int QueueRetryDelayMs = int.Parse(ConfigurationManager.AppSettings.Get("QueueRetryDelayMs") ?? "5000");
+		
+		// Smart Load Strategy (inspired by SQLWATCH load_type)
+		public static bool UseSmartLoadStrategy = bool.Parse(ConfigurationManager.AppSettings.Get("UseSmartLoadStrategy") ?? "true");
+		public static bool MetaTablesFullLoadOnly = bool.Parse(ConfigurationManager.AppSettings.Get("MetaTablesFullLoadOnly") ?? "true");
+		public static bool LoggerTablesDeltaLoad = bool.Parse(ConfigurationManager.AppSettings.Get("LoggerTablesDeltaLoad") ?? "true");
+		
+		// Dependency Management (inspired by SQLWATCH priority system)
+		public static bool UseDependencyBasedOrdering = bool.Parse(ConfigurationManager.AppSettings.Get("UseDependencyBasedOrdering") ?? "true");
+		public static int MetaTablePriority = int.Parse(ConfigurationManager.AppSettings.Get("MetaTablePriority") ?? "1");
+		public static int LoggerTablePriority = int.Parse(ConfigurationManager.AppSettings.Get("LoggerTablePriority") ?? "2");
+
 		// Other
 		public static string textDivider = "------------------------------------------------------------------------";
 		public static string tsplaceholder = "                        ";
