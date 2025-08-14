@@ -15,6 +15,47 @@ namespace SqlWatchImport
 {
 	public class SqlWatchInstance : IDisposable
 	{
+		/// <summary>
+		/// Sanitizes a string to be safe for use as a SQL identifier
+		/// </summary>
+		private static string SanitizeSqlIdentifier(string input)
+		{
+			if (string.IsNullOrWhiteSpace(input))
+				return "unknown";
+
+			// Remove common brackets and schema prefixes
+			string cleaned = input.Replace("dbo.", "").Replace("[", "").Replace("]", "");
+			
+			// Build a safe identifier using only alphanumeric characters and underscores
+			StringBuilder result = new StringBuilder();
+			
+			foreach (char c in cleaned)
+			{
+				if (char.IsLetterOrDigit(c))
+				{
+					result.Append(c);
+				}
+				else
+				{
+					result.Append('_');
+				}
+			}
+			
+			// Ensure it starts with a letter or underscore (SQL requirement)
+			string final = result.ToString();
+			if (final.Length > 0 && char.IsDigit(final[0]))
+			{
+				final = "_" + final;
+			}
+			
+			// Limit length to avoid SQL identifier length limits (128 characters)
+			if (final.Length > 50) // Leave room for prefixes and suffixes
+			{
+				final = final.Substring(0, 50);
+			}
+			
+			return string.IsNullOrEmpty(final) ? "unknown" : final;
+		}
 
 		public static double t1 = 0; // Total time ms spent on bulk copy full load;
 		public static double t2 = 0; // Total time ms spent on merge;
@@ -368,15 +409,14 @@ namespace SqlWatchImport
 			// For performance optimization: if we detect large datasets, prefer staging even for logger tables
 			// This will be determined after we know the row count from bulk copy
 			
-			// Create truly unique staging table names to avoid collisions
-			string uniqueId = $"{Environment.MachineName}_{Thread.CurrentThread.ManagedThreadId}_{DateTime.Now:yyyyMMddHHmmssfff}_{Guid.NewGuid().ToString("N").Substring(0, 8)}";
-			// Clean up special characters that could cause SQL issues
-			string safeInstanceName = SqlInstance.Replace("\\", "_").Replace(".", "_").Replace("-", "_").Replace(" ", "_").Replace("[", "").Replace("]", "");
-			string safeTableName = tableName.Replace("dbo.", "").Replace("[", "").Replace("]", "");
+			// Create SQL-safe identifier names to avoid invalid characters
+			string safeInstanceName = SanitizeSqlIdentifier(SqlInstance);
+			string safeTableName = SanitizeSqlIdentifier(tableName.Replace("dbo.", ""));
+			string uniqueSuffix = $"{DateTime.Now:yyyyMMddHHmmss}_{Thread.CurrentThread.ManagedThreadId}";
 			
 			string workingTableName = useStaging ? 
-				$"[#stg_{safeTableName}_{safeInstanceName}_{DateTime.Now:yyyyMMddHHmmss}_{Thread.CurrentThread.ManagedThreadId}]" : 
-				$"[#{ tableName }]";
+				$"[#stg_{safeTableName}_{safeInstanceName}_{uniqueSuffix}]" : 
+				$"[#{safeTableName}]";
 
 			Logger.LogVerbose($"Starting import of \"{tableName}\" for \"{SqlInstance}\" using {(useStaging ? "staging" : "direct")} approach");
 
@@ -908,13 +948,13 @@ namespace SqlWatchImport
 									}
 
 									// Create new unique staging table name for retry
-									string newUniqueId = $"{Environment.MachineName}_{Thread.CurrentThread.ManagedThreadId}_{DateTime.Now:yyyyMMddHHmmssfff}_{Guid.NewGuid().ToString("N").Substring(0, 8)}";
-									string newSafeInstanceName = SqlInstance.Replace("\\", "_").Replace(".", "_").Replace("-", "_").Replace(" ", "_").Replace("[", "").Replace("]", "");
-									string newSafeTableName = tableName.Replace("dbo.", "").Replace("[", "").Replace("]", "");
+									string newSafeInstanceName = SanitizeSqlIdentifier(SqlInstance);
+									string newSafeTableName = SanitizeSqlIdentifier(tableName.Replace("dbo.", ""));
+									string retryUniqueSuffix = $"{DateTime.Now:yyyyMMddHHmmss}_{Thread.CurrentThread.ManagedThreadId}_r{retryCount}";
 									
 									workingTableName = useStaging ? 
-										$"[#stg_{newSafeTableName}_{newSafeInstanceName}_{DateTime.Now:yyyyMMddHHmmss}_{Thread.CurrentThread.ManagedThreadId}_r{retryCount}]" : 
-										$"[#{ tableName }_r{retryCount}]";
+										$"[#stg_{newSafeTableName}_{newSafeInstanceName}_{retryUniqueSuffix}]" : 
+										$"[#{newSafeTableName}_r{retryCount}]";
 
 									// Recreate staging table with new name
 									try
