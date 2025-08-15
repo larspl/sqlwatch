@@ -95,7 +95,7 @@
           "alias": "",
           "format": "time_series",
           "hide": false,
-          "rawSql": "SELECT [time]=event_time, [Long queries] = count(distinct session_id)\n  FROM [dbo].[vw_sqlwatch_report_fact_xes_long_queries]\n     where [sql_instance] = '$sql_instance'\n   AND $__timeFilter(event_time)\n   GROUP BY event_time\nORDER BY\n  time desc",
+          "rawSql": "-- Dynamic query using linked server for long queries count\nDECLARE @linked_server_name NVARCHAR(255), @database_name NVARCHAR(128)\nSELECT @linked_server_name = ISNULL(linked_server_name, sql_instance),\n       @database_name = sqlwatch_database_name\nFROM [dbo].[sqlwatch_config_sql_instance] \nWHERE sql_instance = '$sql_instance'\n\nDECLARE @sql NVARCHAR(MAX) = '\nSELECT [time]=event_time, [Long queries] = count(distinct session_id)\n  FROM [' + @linked_server_name + '].[' + @database_name + '].[dbo].[vw_sqlwatch_report_fact_xes_long_queries]\n     where [sql_instance] = ''$sql_instance''\n   AND $__timeFilter(event_time)\n   GROUP BY event_time\nORDER BY time desc'\n\nEXEC sp_executesql @sql",
           "refId": "A"
         }
       ],
@@ -258,7 +258,7 @@
           "alias": "",
           "format": "table",
           "hide": false,
-          "rawSql": "SELECT *\n  FROM [dbo].[vw_sqlwatch_report_fact_xes_long_queries]\n     where [sql_instance] = '$sql_instance'\n   AND $__timeFilter(event_time)\nORDER BY\n  event_time desc",
+          "rawSql": "-- Dynamic query using linked server for long queries details\nDECLARE @linked_server_name NVARCHAR(255), @database_name NVARCHAR(128)\nSELECT @linked_server_name = ISNULL(linked_server_name, sql_instance),\n       @database_name = sqlwatch_database_name\nFROM [dbo].[sqlwatch_config_sql_instance] \nWHERE sql_instance = '$sql_instance'\n\nDECLARE @sql NVARCHAR(MAX) = '\nSELECT *\n  FROM [' + @linked_server_name + '].[' + @database_name + '].[dbo].[vw_sqlwatch_report_fact_xes_long_queries]\n     where [sql_instance] = ''$sql_instance''\n   AND $__timeFilter(event_time)\nORDER BY event_time desc'\n\nEXEC sp_executesql @sql",
           "refId": "A"
         }
       ],
@@ -348,7 +348,7 @@
           "alias": "",
           "format": "table",
           "queryType": "randomWalk",
-          "rawSql": "SELECT time=getdate(),sql_text, statement\n  FROM [dbo].[vw_sqlwatch_report_fact_xes_long_queries]\n     where [sql_instance] = '$sql_instance'\n   AND $__timeFilter(event_time)\n   AND long_query_id = isnull('$LongQueryId',-1) \n",
+          "rawSql": "-- Dynamic query using linked server for specific long query details\nDECLARE @linked_server_name NVARCHAR(255), @database_name NVARCHAR(128)\nSELECT @linked_server_name = ISNULL(linked_server_name, sql_instance),\n       @database_name = sqlwatch_database_name\nFROM [dbo].[sqlwatch_config_sql_instance] \nWHERE sql_instance = '$sql_instance'\n\nDECLARE @sql NVARCHAR(MAX) = '\nSELECT time=getdate(),sql_text, statement\n  FROM [' + @linked_server_name + '].[' + @database_name + '].[dbo].[vw_sqlwatch_report_fact_xes_long_queries]\n     where [sql_instance] = ''$sql_instance''\n   AND $__timeFilter(event_time)\n   AND long_query_id = isnull(''$LongQueryId'',-1)'\n\nEXEC sp_executesql @sql",
           "refId": "A"
         }
       ],

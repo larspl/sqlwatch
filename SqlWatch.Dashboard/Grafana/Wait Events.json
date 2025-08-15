@@ -122,7 +122,7 @@
         {
           "alias": "",
           "format": "time_series",
-          "rawSql": "SELECT \n      [time]= event_time\n      ,[Wait Type] = case when '$Waits' = 'Category' then [wait_category] else [wait_type] end\n      ,[Wait Duration] = sum([duration])\n  FROM [vw_sqlwatch_report_fact_xes_wait_events]\n    \n  WHERE $__timeFilter(event_time)\n  AND [sql_instance] = '$sql_instance'\n\n  group by event_time,case when '$Waits' = 'Category' then [wait_category] else [wait_type] end\nORDER BY\n  time ASC",
+          "rawSql": "-- Dynamic query using linked server for wait events\nDECLARE @linked_server_name NVARCHAR(255), @database_name NVARCHAR(128)\nSELECT @linked_server_name = ISNULL(linked_server_name, sql_instance),\n       @database_name = sqlwatch_database_name\nFROM [dbo].[sqlwatch_config_sql_instance] \nWHERE sql_instance = '$sql_instance'\n\nDECLARE @sql NVARCHAR(MAX) = '\nSELECT \n      [time]= event_time\n      ,[Wait Type] = case when ''$Waits'' = ''Category'' then [wait_category] else [wait_type] end\n      ,[Wait Duration] = sum([duration])\n  FROM [' + @linked_server_name + '].[' + @database_name + '].[dbo].[vw_sqlwatch_report_fact_xes_wait_events]\n  WHERE $__timeFilter(event_time)\n  AND [sql_instance] = ''$sql_instance''\n  group by event_time,case when ''$Waits'' = ''Category'' then [wait_category] else [wait_type] end\nORDER BY time ASC'\n\nEXEC sp_executesql @sql",
           "refId": "A"
         }
       ],
@@ -247,7 +247,7 @@
         {
           "alias": "",
           "format": "table",
-          "rawSql": "select \t event_time\t\n\t,wait_type\t\n\t,wait_category\t\n\t,duration\t\n\t,signal_duration\t\n\t,session_id\t\n\t,username\t\n\t,client_hostname\t\n\t,client_app_name\t\n\t,database_name\t\n\t,sql_instance\t\n\t,snapshot_time\t\n\t,sql_text\n\t,query_plan_hash=convert(varchar(max),isnull(query_plan_hash,0),2)\nfrom [dbo].[vw_sqlwatch_report_fact_xes_wait_events] \nWHERE [sql_instance] = '$sql_instance'\nAND $__timeFilter(event_time)",
+          "rawSql": "-- Dynamic query using linked server for wait events details\nDECLARE @linked_server_name NVARCHAR(255), @database_name NVARCHAR(128)\nSELECT @linked_server_name = ISNULL(linked_server_name, sql_instance),\n       @database_name = sqlwatch_database_name\nFROM [dbo].[sqlwatch_config_sql_instance] \nWHERE sql_instance = '$sql_instance'\n\nDECLARE @sql NVARCHAR(MAX) = '\nselect \t event_time\t\n\t,wait_type\t\n\t,wait_category\t\n\t,duration\t\n\t,signal_duration\t\n\t,session_id\t\n\t,username\t\n\t,client_hostname\t\n\t,client_app_name\t\n\t,database_name\t\n\t,sql_instance\t\n\t,snapshot_time\t\n\t,sql_text\n\t,query_plan_hash=convert(varchar(max),isnull(query_plan_hash,0),2)\nfrom [' + @linked_server_name + '].[' + @database_name + '].[dbo].[vw_sqlwatch_report_fact_xes_wait_events] \nWHERE [sql_instance] = ''$sql_instance''\nAND $__timeFilter(event_time)'\n\nEXEC sp_executesql @sql",
           "refId": "A"
         }
       ],
