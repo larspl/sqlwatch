@@ -314,7 +314,7 @@
           "alias": "",
           "format": "table",
           "queryType": "randomWalk",
-          "rawSql": "select distinct time=getdate(),convert(varchar(max),sql_text)\nfrom [dbo].[vw_sqlwatch_report_fact_xes_wait_events] \nwhere $__timeFilter(event_time)\nand convert(varchar(max),query_plan_hash,2) = right('$QueryPlanHash',len('$QueryPlanHash')-2)",
+          "rawSql": "-- Hybrid query supporting both Central Repository and Live Data modes\nIF '$data_source' = 'SQLWatchCentral'\nBEGIN\n    -- Central Repository Mode: Query local imported data\n    select distinct time=getdate(),convert(varchar(max),sql_text)\n    from [dbo].[vw_sqlwatch_report_fact_xes_wait_events] \n    where $__timeFilter(event_time)\n    and convert(varchar(max),query_plan_hash,2) = right('$QueryPlanHash',len('$QueryPlanHash')-2)\nEND\nELSE\nBEGIN\n    -- Live Data Mode: Query via linked server\n    DECLARE @linked_server_name NVARCHAR(255), @database_name NVARCHAR(128)\n    SELECT @linked_server_name = ISNULL(linked_server_name, sql_instance),\n           @database_name = sqlwatch_database_name\n    FROM [dbo].[sqlwatch_config_sql_instance] \n    WHERE sql_instance = '$sql_instance'\n\n    DECLARE @sql NVARCHAR(MAX) = '\n    select distinct time=getdate(),convert(varchar(max),sql_text)\n    from [' + @linked_server_name + '].[' + @database_name + '].[dbo].[vw_sqlwatch_report_fact_xes_wait_events] \n    where $__timeFilter(event_time)\n    and convert(varchar(max),query_plan_hash,2) = right(''$QueryPlanHash'',len(''$QueryPlanHash'')-2)'\n    \n    EXEC sp_executesql @sql\nEND",
           "refId": "A"
         }
       ],
@@ -350,6 +350,35 @@
         "regex": "",
         "skipUrlSync": false,
         "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "Central Repository",
+          "value": "SQLWatchCentral"
+        },
+        "description": "Choose between Central Repository (imported data) and Live Data (linked server queries)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data Source Mode",
+        "multi": false,
+        "name": "data_source",
+        "options": [
+          {
+            "selected": true,
+            "text": "Central Repository",
+            "value": "SQLWatchCentral"
+          },
+          {
+            "selected": false,
+            "text": "Live Data",
+            "value": "Live"
+          }
+        ],
+        "query": "Central Repository : SQLWatchCentral, Live Data : Live",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "type": "custom"
       },
       {
         "allValue": null,

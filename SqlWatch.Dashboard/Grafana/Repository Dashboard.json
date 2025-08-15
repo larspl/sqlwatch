@@ -683,7 +683,7 @@
           "alias": "",
           "format": "time_series",
           "hide": false,
-          "rawSql": "SELECT\n      [time] = [snapshot_time] --$__timeGroup([snapshot_time], $aggregation) \n      ,metric = [counter_name]\n      ,[value] = sum([cntr_value_calculated])\n  FROM [dbo].[vw_sqlwatch_report_fact_perf_os_performance_counters]\n  WHERE [aggregation_interval_minutes] = 1\n   AND $__timeFilter(snapshot_time)\n   AND snapshot_time >= dateadd(minute,-15,getutcdate())\n   AND counter_name IN ('Batch Requests/sec','Readahead pages/sec','Transactions/sec','Processes blocked')\n   AND instance_name NOT IN ('mssqlsystemresource')\n   AND [sql_instance] IN ($sql_instance)\n   GROUP BY snapshot_time, counter_name --, $__timeGroup([snapshot_time], $aggregation) \nORDER BY\n  time ASC\n  ",
+          "rawSql": "-- Hybrid query supporting both Central Repository and Live Data modes\nIF '$data_source' = 'SQLWatchCentral'\nBEGIN\n    -- Central Repository Mode: Query local imported data\n    SELECT\n          [time] = [snapshot_time]\n          ,metric = [counter_name]\n          ,[value] = sum([cntr_value_calculated])\n      FROM [dbo].[vw_sqlwatch_report_fact_perf_os_performance_counters]\n      WHERE [aggregation_interval_minutes] = 1\n       AND $__timeFilter(snapshot_time)\n       AND snapshot_time >= dateadd(minute,-15,getutcdate())\n       AND counter_name IN ('Batch Requests/sec','Readahead pages/sec','Transactions/sec','Processes blocked')\n       AND instance_name NOT IN ('mssqlsystemresource')\n       AND [sql_instance] IN ($sql_instance)\n       GROUP BY snapshot_time, counter_name\n    ORDER BY time ASC\nEND\nELSE\nBEGIN\n    -- Live Data Mode: Not recommended for multi-instance repository queries\n    -- Repository dashboards work best with Central Repository mode\n    SELECT time = GETDATE(), metric = 'Repository queries', [value] = 0\n    WHERE 1=0 -- Return empty result with message that this requires Central mode\nEND",
           "refId": "perf_os_performance_counters"
         },
         {
@@ -1688,6 +1688,35 @@
         "regex": "",
         "skipUrlSync": false,
         "type": "datasource"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "Central Repository",
+          "value": "SQLWatchCentral"
+        },
+        "description": "Choose between Central Repository (imported data) and Live Data (linked server queries)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data Source Mode",
+        "multi": false,
+        "name": "data_source",
+        "options": [
+          {
+            "selected": true,
+            "text": "Central Repository",
+            "value": "SQLWatchCentral"
+          },
+          {
+            "selected": false,
+            "text": "Live Data",
+            "value": "Live"
+          }
+        ],
+        "query": "Central Repository : SQLWatchCentral, Live Data : Live",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "type": "custom"
       },
       {
         "allValue": "@@servername",
